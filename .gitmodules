@@ -1,0 +1,9 @@
+[submodule "tuantuan-bsp"]
+	path = tuantuan/firmware-workspace/submodule/esp-mosaico-bsp
+	url = https://github.com/esp-mosaico/esp-mosaico-bsp.git
+[submodule "tuantuan-utils"]
+	path = tuantuan/firmware-workspace/submodule/esp-mosaico-utils
+	url = https://github.com/esp-mosaico/esp-mosaico-utils.git
+[submodule "tuantuan-raylib"]
+	path = tuantuan/firmware-workspace/submodule/raylib-lite-engine
+	url = https://github.com/espressif2022/raylib-lite-engine.git

@@ -1,0 +1,27 @@
+name: Tuantuan checks
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  server-and-configuration:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+      - uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: '3.12'
+      - name: Check tracked configuration and private files
+        run: python scripts/check_private_files.py
+      - name: Run service regression tests
+        working-directory: tuantuan/server
+        run: python -m unittest discover -s tests -v
+      - name: Run provisioning address regression
+        working-directory: tuantuan/firmware-workspace/projects/tuantuan
+        run: |
+          cc -std=c11 -Wall -Wextra -Werror -I main tests/provision_peer_test.c -o /tmp/tuantuan-provision-peer-test
+          /tmp/tuantuan-provision-peer-test

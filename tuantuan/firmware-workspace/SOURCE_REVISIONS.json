@@ -1,0 +1,8 @@
+{
+  "workspace": "dd63f3a742686d90046dd4eb003a4f8eb1ad05f1",
+  "release": "v26.0.2",
+  "utils": "fc63d43f3ac72aa54e701b07b07fbed07a16b3ca",
+  "bsp": "a2c985ad698b3f04a21c63e006b43e7e948bc1d7",
+  "esp_idf": "7b9cc1ac79f865983f59bb8ff3ff43eb74ff1dbe",
+  "raylib": "ca3200a6b7f63e2bdea07851e19fdbd3a42eb742"
+}

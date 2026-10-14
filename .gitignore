@@ -1,0 +1,33 @@
+# Credentials: only deliberately named templates may be tracked.
+**/.env
+**/.env.*
+**/*.env
+**/config.env*
+!**/.env.example
+!**/config.example.env
+**/*.pem
+**/*.key
+
+# Runtime conversation, tasks, models and recordings.
+**/server/data/
+**/*.sqlite*
+**/*.db
+**/*.wav
+**/*.aiff
+**/*.pcm
+**/*.log
+**/.venv/
+**/__pycache__/
+**/*.py[cod]
+
+# SDKs, local device state and generated builds.
+**/build*/
+**/managed_components/
+**/sdkconfig
+**/sdkconfig.old
+**/.codex-runs/
+**/.mosaico-state/
+**/.tools/
+**/artifacts/
+**/assets/generated/
+.DS_Store
