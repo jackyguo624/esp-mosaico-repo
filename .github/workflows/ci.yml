@@ -21,7 +21,7 @@ jobs:
         working-directory: tuantuan/server
         run: python -m unittest discover -s tests -v
       - name: Run provisioning address regression
-        working-directory: tuantuan/firmware-workspace/projects/tuantuan
+        working-directory: tuantuan
         run: |
           cc -std=c11 -Wall -Wextra -Werror -I main tests/provision_peer_test.c -o /tmp/tuantuan-provision-peer-test
           /tmp/tuantuan-provision-peer-test

@@ -1,1 +1,0 @@
-PASS: IPv4, IPv4-mapped IPv6, AP isolation, truncated addresses and real dual-stack socket.

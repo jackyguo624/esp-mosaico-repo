@@ -10,6 +10,7 @@ import time
 import urllib.error
 import urllib.request
 import wave
+from collections import OrderedDict
 from pathlib import Path
 
 class _InvalidModelResponse(ValueError):
@@ -57,7 +58,58 @@ class Services:
         self.asr = None
         self.asr_lock = threading.Lock()
         self.tts_lock = threading.Lock()
+        self.status_lock = threading.Lock()
+        self.asr_status = 'cold'
+        self.warmup_thread = None
+        self.tts_cache = OrderedDict()
+        self.tts_cache_bytes = 0
         self.demo = config.get('DEMO_MODE') == '1'
+
+    @property
+    def readiness(self):
+        with self.status_lock:
+            asr = self.asr_status
+        return {'asr':asr, 'tts':self.config.get('TTS_ENGINE','say') != 'none',
+                'llm':bool(self.config.get('DEEPSEEK_API_KEY'))}
+
+    def _load_asr(self):
+        # Caller owns asr_lock. Readiness uses a separate short lock so polling
+        # remains responsive while a model downloads or loads.
+        if self.asr is not None:
+            return
+        with self.status_lock:
+            self.asr_status = 'loading'
+        try:
+            if self.config.get('ASR_DISABLE_XET','1') == '1':
+                os.environ.setdefault('HF_HUB_DISABLE_XET','1')
+            from faster_whisper import WhisperModel
+            self.asr = WhisperModel(self.config.get('ASR_MODEL','small'),
+                                    device=self.config.get('ASR_DEVICE','cpu'),
+                                    compute_type=self.config.get('ASR_COMPUTE_TYPE','int8'),
+                                    cpu_threads=int(self.config.get('ASR_CPU_THREADS','4')),
+                                    download_root=str(Path(self.config['DATA_DIR']) / 'models'))
+        except ImportError:
+            with self.status_lock: self.asr_status = 'error'
+            raise RuntimeError('请安装电脑端语音识别依赖') from None
+        except Exception:
+            with self.status_lock: self.asr_status = 'error'
+            raise RuntimeError('语音识别模型加载失败，请检查电脑端网络或模型目录') from None
+        with self.status_lock: self.asr_status = 'ready'
+
+    def start_warmup(self):
+        if self.demo or self.config.get('ASR_PRELOAD','1') != '1':
+            return
+        with self.status_lock:
+            if self.warmup_thread is not None:
+                return
+            def warmup():
+                try:
+                    with self.asr_lock: self._load_asr()
+                    logging.getLogger(__name__).info('ASR model ready')
+                except RuntimeError:
+                    logging.getLogger(__name__).error('ASR model warmup failed; check network or local model path')
+            self.warmup_thread = threading.Thread(target=warmup, name='tuantuan-asr', daemon=True)
+            self.warmup_thread.start()
 
     def transcribe(self, data):
         try:
@@ -66,21 +118,20 @@ class Services:
                     raise ValueError('录音须为 16kHz、单声道、16bit WAV')
                 if not 0.2 <= wav.getnframes() / 16000 <= 20.1:
                     raise ValueError('录音时长须为 0.2–20 秒')
+                pcm = wav.readframes(wav.getnframes())
+                if len(pcm) != wav.getnframes() * 2:
+                    raise ValueError('录音数据不完整，请再说一次')
         except (wave.Error, EOFError) as exc:
             raise ValueError('录音格式无效') from exc
         if self.demo:
             raise ValueError('演示模式只支持文字，录音需要启用 ASR')
         with self.asr_lock:
-            if self.asr is None:
-                try:
-                    from faster_whisper import WhisperModel
-                except ImportError as exc:
-                    raise RuntimeError('请安装 requirements-asr.txt 中的语音识别依赖') from exc
-                self.asr = WhisperModel(self.config.get('ASR_MODEL', 'small'),
-                                        device=self.config.get('ASR_DEVICE', 'cpu'),
-                                        compute_type=self.config.get('ASR_COMPUTE_TYPE', 'int8'),
-                                        download_root=str(Path(self.config['DATA_DIR']) / 'models'))
-            segments, _ = self.asr.transcribe(io.BytesIO(data), language='zh', beam_size=3,
+            self._load_asr()
+            # The device already supplies validated 16 kHz PCM. Feed samples
+            # directly, avoiding an unnecessary media decoder and PyAV ABI drift.
+            import numpy as np
+            samples = np.frombuffer(pcm, dtype='<i2').astype(np.float32) / 32768.0
+            segments, _ = self.asr.transcribe(samples, language='zh', beam_size=int(self.config.get('ASR_BEAM_SIZE','3')),
                                               vad_filter=True, condition_on_previous_text=False)
             text = ''.join(segment.text for segment in segments).strip()
         if not text:
@@ -155,16 +206,36 @@ due 为带时区的 ISO8601 时间，无定时的待办 due 为 null；repeat �
     def synthesize(self, text):
         if not text or len(text) > 500:
             raise ValueError('朗读文本过长')
+        key = (text, self.config.get('TTS_ENGINE','say'), self.config.get('TTS_VOICE','Tingting'),
+               self.config.get('TTS_RATE','180'), self.config.get('PIPER_BIN','piper'), self.config.get('PIPER_MODEL',''))
+        limit = max(0,min(32,int(self.config.get('TTS_CACHE_MB','8')))) * 1024 * 1024
+        with self.tts_lock:
+            while self.tts_cache and self.tts_cache_bytes > limit:
+                _, old = self.tts_cache.popitem(last=False)
+                self.tts_cache_bytes -= len(old)
+            if key in self.tts_cache:
+                self.tts_cache.move_to_end(key)
+                return self.tts_cache[key]
+            pcm = self._synthesize_uncached(text)
+            if len(pcm) <= limit:
+                while self.tts_cache and self.tts_cache_bytes + len(pcm) > limit:
+                    _, old = self.tts_cache.popitem(last=False)
+                    self.tts_cache_bytes -= len(old)
+                self.tts_cache[key] = pcm
+                self.tts_cache_bytes += len(pcm)
+            return pcm
+
+    def _synthesize_uncached(self, text):
         engine = self.config.get('TTS_ENGINE', 'say')
         if engine == 'none':
             raise RuntimeError('语音合成尚未启用')
-        with self.tts_lock, tempfile.TemporaryDirectory() as tmp:
+        with tempfile.TemporaryDirectory() as tmp:
             src = Path(tmp) / 'voice.wav'
             try:
                 if engine == 'say':
                     aiff = Path(tmp) / 'voice.aiff'
                     subprocess.run(['say', '-v', self.config.get('TTS_VOICE', 'Tingting'),
-                                    '-r', '180', '-o', str(aiff), '--', text],
+                                    '-r', self.config.get('TTS_RATE','180'), '-o', str(aiff), '--', text],
                                    check=True, capture_output=True, timeout=35)
                     subprocess.run(['afconvert', '-f', 'WAVE', '-d', 'LEI16@16000', '-c', '1',
                                     str(aiff), str(src)], check=True, capture_output=True, timeout=10)

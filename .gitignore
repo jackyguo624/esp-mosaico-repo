@@ -31,3 +31,14 @@
 **/artifacts/
 **/assets/generated/
 .DS_Store
+
+# Compiled firmware can embed local build paths; publish source and templates.
+**/*.irisfw
+**/*.bin
+**/*.elf
+**/*.map
+
+# Local validation evidence, retained on this computer only.
+tuantuan/docs/images/device-*
+tuantuan/docs/*-tests.txt
+tuantuan/docs/model-continuous-check.txt

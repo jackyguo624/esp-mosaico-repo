@@ -13,6 +13,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from services import Services
 from store import Store
+from configuration import save_model_key, validate_key
 
 MAX_BODY = 650000
 ID_PATTERN = re.compile(r'[a-zA-Z0-9_-]{1,64}\Z')
@@ -28,12 +29,14 @@ def load_config(path):
                 config[key.strip()] = value.strip().strip('"').strip("'")
     config.update({k:v for k,v in os.environ.items() if k in (
         'HOST','PORT','DEVICE_TOKEN','DEEPSEEK_API_KEY','LLM_BASE_URL','LLM_MODEL','TIMEZONE',
-        'ASR_MODEL','ASR_DEVICE','ASR_COMPUTE_TYPE','TTS_ENGINE','TTS_VOICE','PIPER_BIN','PIPER_MODEL','DEMO_MODE','DATA_DIR')})
+        'ASR_MODEL','ASR_DEVICE','ASR_COMPUTE_TYPE','ASR_PRELOAD','ASR_BEAM_SIZE','ASR_CPU_THREADS','ASR_DISABLE_XET',
+        'TTS_ENGINE','TTS_VOICE','TTS_RATE','TTS_CACHE_MB','PIPER_BIN','PIPER_MODEL','DEMO_MODE','DATA_DIR')})
     return config
 
 class Companion:
-    def __init__(self, config, store=None, services=None):
+    def __init__(self, config, store=None, services=None, config_path=None):
         self.config = config
+        self.config_path = config_path
         self.store = store or Store(Path(config['DATA_DIR']) / 'tuantuan.sqlite3', config.get('TIMEZONE','Asia/Shanghai'))
         self.services = services or Services(config)
         # Single owner per device for turns, short independent DB locks for state polling.
@@ -56,8 +59,11 @@ class Companion:
 
     def state(self, device):
         self.store.rollover(device)
+        ready = getattr(self.services,'readiness',{'asr':'ready','tts':True,'llm':True})
         return {'tasks': self.store.tasks(device), 'reminders':self.store.due(device),
                 'now':int(self.store.now().timestamp()), 'timezone':self.store.zone.key,
+                'speech_ready':ready['asr']=='ready' and ready['tts'] and ready['llm'],
+                'speech_status':ready,
                 'demo':self.services.demo}
 
     def turn(self, device, turn_id, data, is_audio):
@@ -83,6 +89,17 @@ class Companion:
             return result
         finally:
             self.turn_lock.release()
+
+    def configure_key(self,data):
+        key=validate_key(data.get('key'))
+        if not self.config_path: raise RuntimeError('电脑端未启用配置保存')
+        if 'DEEPSEEK_API_KEY' in os.environ: raise RuntimeError('该 Key 由电脑环境变量管理，请在电脑上修改')
+        if not self.turn_lock.acquire(blocking=False): raise BusyError('正在处理对话，请稍后保存 Key')
+        try:
+            save_model_key(self.config_path,key)
+            self.config['DEEPSEEK_API_KEY']=key
+            return {'ok':True,'message':'API Key 已保存到电脑端'}
+        finally: self.turn_lock.release()
 
 class BusyError(RuntimeError):
     pass
@@ -121,7 +138,8 @@ def handler_for(app):
         def do_GET(self):
             path = urlsplit(self.path).path
             if path == '/health':
-                return self.reply(200, {'ok':True, 'version':'0.1','demo':app.services.demo})
+                return self.reply(200, {'ok':True, 'version':'1.0.2','demo':app.services.demo,
+                                       'speech_status':getattr(app.services,'readiness',{})})
             device = self.authorized()
             if not device: return
             if path == '/v1/state':
@@ -157,6 +175,8 @@ def handler_for(app):
                         result = app.turn(device, data.get('turn_id',''), data, False)
                     elif path == '/v1/task':
                         result = {'tasks':app.store.task_action(device, data.get('id'),data.get('action'),data.get('seconds',600))}
+                    elif path == '/v1/config/key':
+                        result = app.configure_key(data)
                     elif path == '/v1/reminder':
                         task = next((t for t in app.store.tasks(device) if t['id'] == data.get('id')),None)
                         if not task or not task['due'] or task['due'] > app.store.now().timestamp():
@@ -195,7 +215,8 @@ def main():
     config.setdefault('DATA_DIR', str(Path(__file__).with_name('data')))
     Path(config['DATA_DIR']).mkdir(mode=0o700, parents=True, exist_ok=True)
     os.umask(0o077)
-    app = Companion(config)
+    app = Companion(config,config_path=args.config)
+    app.services.start_warmup()
     server = ThreadingHTTPServer((config.get('HOST','127.0.0.1'),int(config.get('PORT','8765'))), handler_for(app))
     server.daemon_threads = True
     print(f'团团服务已启动，端口 {server.server_port}；演示模式={app.services.demo}', flush=True)
